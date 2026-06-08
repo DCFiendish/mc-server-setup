@@ -6,19 +6,33 @@
 #  GitHub: DCFiendish
 # =============================================================
 
-set -e
+set -Eeuo pipefail
 
-# Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-info()    { echo -e "${GREEN}[INFO]${NC} $1"; }
-warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
-error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
+error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 USER_AGENT="DCFiendish-mc-setup/1.0 (https://github.com/DCFiendish)"
+
+# Helper: download a plugin with validation
+# Usage: dl_plugin <url> <output_path> <name>
+dl_plugin() {
+  local url="$1"
+  local out="$2"
+  local name="$3"
+  if [ -z "$url" ]; then
+    warn "  $name: download URL not found — install manually."
+    return
+  fi
+  sudo -u minecraft curl -fsSL -A "$USER_AGENT" "$url" -o "$out" \
+    || warn "  $name: download failed — install manually."
+  info "  $name downloaded."
+}
 
 # =============================================================
 #  QUESTIONS
@@ -73,7 +87,7 @@ esac
 echo ""
 read -p "World seed (leave blank for random): " WORLD_SEED
 
-# RAM — allocate 8GB out of 24GB
+# RAM
 RAM="8G"
 
 # Optional plugins
@@ -94,7 +108,7 @@ echo ""
 info "Updating system packages..."
 sudo apt-get update -y
 sudo apt-get upgrade -y
-sudo apt-get install -y curl wget jq ufw unzip
+sudo apt-get install -y curl wget jq ufw unzip tmux
 
 # =============================================================
 #  JAVA 21 (Eclipse Temurin via Adoptium)
@@ -124,7 +138,7 @@ info "Java 21 installed."
 
 info "Creating minecraft user and directories..."
 if ! id "minecraft" &>/dev/null; then
-  sudo useradd -r -m -d /opt/minecraft -s /bin/bash minecraft
+  sudo useradd -r -m -U -d /opt/minecraft -s /usr/sbin/nologin minecraft
 fi
 sudo mkdir -p /opt/minecraft/server/plugins
 sudo chown -R minecraft:minecraft /opt/minecraft
@@ -136,11 +150,9 @@ sudo chown -R minecraft:minecraft /opt/minecraft
 info "Downloading $SOFTWARE $MC_VERSION..."
 
 if [ "$SOFTWARE" = "paper" ]; then
-  # Paper v3 API
-  BUILDS_JSON=$(curl -s -H "User-Agent: $USER_AGENT" \
+  BUILDS_JSON=$(curl -fsSL -A "$USER_AGENT" \
     "https://fill.papermc.io/v3/projects/paper/versions/${MC_VERSION}/builds")
 
-  # Check for error
   if echo "$BUILDS_JSON" | jq -e '.ok == false' > /dev/null 2>&1; then
     error "Paper API error for version $MC_VERSION: $(echo $BUILDS_JSON | jq -r '.message')"
   fi
@@ -148,21 +160,30 @@ if [ "$SOFTWARE" = "paper" ]; then
   JAR_URL=$(echo "$BUILDS_JSON" | jq -r \
     'first(.[] | select(.channel == "STABLE") | .downloads."server:default".url) // "null"')
 
-  if [ "$JAR_URL" = "null" ]; then
+  if [ "$JAR_URL" = "null" ] || [ -z "$JAR_URL" ]; then
     error "No stable Paper build found for $MC_VERSION."
   fi
 
-  sudo -u minecraft curl -s -H "User-Agent: $USER_AGENT" \
+  sudo -u minecraft curl -fsSL -A "$USER_AGENT" \
     -o /opt/minecraft/server/server.jar "$JAR_URL"
 
 elif [ "$SOFTWARE" = "purpur" ]; then
-  # Purpur v2 API
-  sudo -u minecraft curl -s \
+  HTTP_CODE=$(sudo -u minecraft curl -fsSL -A "$USER_AGENT" \
+    -w "%{http_code}" \
     -o /opt/minecraft/server/server.jar \
-    "https://api.purpurmc.org/v2/purpur/${MC_VERSION}/latest/download"
+    "https://api.purpurmc.org/v2/purpur/${MC_VERSION}/latest/download")
+
+  if [ "$HTTP_CODE" != "200" ]; then
+    error "Failed to download Purpur ${MC_VERSION} (HTTP $HTTP_CODE). Check the version is valid."
+  fi
 fi
 
-info "Server jar downloaded."
+# Verify it's actually a JAR
+if ! file /opt/minecraft/server/server.jar | grep -q "Java archive"; then
+  error "Downloaded file is not a valid JAR. The version may not exist or the API may be down."
+fi
+
+info "Server jar downloaded and verified."
 
 # =============================================================
 #  ACCEPT EULA
@@ -177,7 +198,6 @@ echo "eula=true" | sudo tee /opt/minecraft/server/eula.txt > /dev/null
 
 info "Writing server.properties..."
 
-SEED_LINE=""
 if [ -n "$WORLD_SEED" ]; then
   SEED_LINE="level-seed=$WORLD_SEED"
 else
@@ -206,7 +226,7 @@ sudo chown minecraft:minecraft /opt/minecraft/server/server.properties
 info "server.properties written."
 
 # =============================================================
-#  START SCRIPT (Aikar flags, >12GB variant for 24GB RAM)
+#  START SCRIPT (Aikar flags, 8G heap tuned for ARM)
 # =============================================================
 
 info "Writing start.sh with Aikar flags..."
@@ -220,10 +240,9 @@ java -Xms${RAM} -Xmx${RAM} \\
   -XX:MaxGCPauseMillis=200 \\
   -XX:+UnlockExperimentalVMOptions \\
   -XX:+DisableExplicitGC \\
-  -XX:+AlwaysPreTouch \\
-  -XX:G1NewSizePercent=40 \\
-  -XX:G1MaxNewSizePercent=50 \\
-  -XX:G1HeapRegionSize=16M \\
+  -XX:G1NewSizePercent=30 \\
+  -XX:G1MaxNewSizePercent=40 \\
+  -XX:G1HeapRegionSize=8M \\
   -XX:G1ReservePercent=15 \\
   -XX:G1HeapWastePercent=5 \\
   -XX:G1MixedGCCountTarget=4 \\
@@ -249,39 +268,48 @@ info "start.sh written."
 info "Downloading base plugins..."
 PLUGINS_DIR="/opt/minecraft/server/plugins"
 
-# AntiXray is built into Paper/Purpur config — no jar needed
 # Spark
-sudo -u minecraft curl -s -L \
+dl_plugin \
   "https://ci.lucko.me/job/spark/lastSuccessfulBuild/artifact/spark-bukkit/build/libs/spark-bukkit.jar" \
-  -o "$PLUGINS_DIR/spark.jar"
-info "  Spark downloaded."
+  "$PLUGINS_DIR/spark.jar" \
+  "Spark"
 
 # DriveBackupV2
-DRIVE_BACKUP_URL=$(curl -s "https://api.github.com/repos/MinIO4/DriveBackupV2/releases/latest" \
-  | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' | head -1)
-sudo -u minecraft curl -s -L "$DRIVE_BACKUP_URL" -o "$PLUGINS_DIR/DriveBackupV2.jar"
-info "  DriveBackupV2 downloaded."
+DRIVE_URL=$(curl -fsSL -A "$USER_AGENT" \
+  "https://api.github.com/repos/MinIO4/DriveBackupV2/releases/latest" \
+  | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' \
+  | head -1 || echo "")
+dl_plugin "$DRIVE_URL" "$PLUGINS_DIR/DriveBackupV2.jar" "DriveBackupV2"
+
+# TAB
+TAB_URL=$(curl -fsSL -A "$USER_AGENT" \
+  "https://api.github.com/repos/NEZNAMY/TAB/releases/latest" \
+  | jq -r '.assets[] | select(.name | endswith(".jar") and (contains("TAB") or contains("tab"))) | .browser_download_url' \
+  | head -1 || echo "")
+dl_plugin "$TAB_URL" "$PLUGINS_DIR/TAB.jar" "TAB"
 
 # Fail2Ban (system level, not a plugin)
-info "  Installing Fail2Ban (system)..."
+info "Installing Fail2Ban (system)..."
 sudo apt-get install -y fail2ban
 sudo systemctl enable fail2ban
 sudo systemctl start fail2ban
 
 # Optional: EssentialsX
 if [[ "$INSTALL_ESSENTIALS" =~ ^[Yy]$ ]]; then
-  ESS_URL=$(curl -s "https://api.github.com/repos/EssentialsX/Essentials/releases/latest" \
-    | jq -r '.assets[] | select(.name | startswith("EssentialsX-") and endswith(".jar")) | .browser_download_url' | head -1)
-  sudo -u minecraft curl -s -L "$ESS_URL" -o "$PLUGINS_DIR/EssentialsX.jar"
-  info "  EssentialsX downloaded."
+  ESS_URL=$(curl -fsSL -A "$USER_AGENT" \
+    "https://api.github.com/repos/EssentialsX/Essentials/releases/latest" \
+    | jq -r '.assets[] | select(.name | startswith("EssentialsX-") and endswith(".jar")) | .browser_download_url' \
+    | head -1 || echo "")
+  dl_plugin "$ESS_URL" "$PLUGINS_DIR/EssentialsX.jar" "EssentialsX"
 fi
 
 # Optional: LuckPerms
 if [[ "$INSTALL_LUCKPERMS" =~ ^[Yy]$ ]]; then
-  LP_URL=$(curl -s "https://api.github.com/repos/LuckPerms/LuckPerms/releases/latest" \
-    | jq -r '.assets[] | select(.name | startswith("LuckPerms-Bukkit")) | .browser_download_url' | head -1)
-  sudo -u minecraft curl -s -L "$LP_URL" -o "$PLUGINS_DIR/LuckPerms.jar"
-  info "  LuckPerms downloaded."
+  LP_URL=$(curl -fsSL -A "$USER_AGENT" \
+    "https://api.github.com/repos/LuckPerms/LuckPerms/releases/latest" \
+    | jq -r '.assets[] | select(.name | startswith("LuckPerms-Bukkit")) | .browser_download_url' \
+    | head -1 || echo "")
+  dl_plugin "$LP_URL" "$PLUGINS_DIR/LuckPerms.jar" "LuckPerms"
 fi
 
 info "All plugins downloaded."
@@ -293,10 +321,10 @@ info "All plugins downloaded."
 info "Configuring UFW firewall..."
 sudo ufw allow 22/tcp    comment 'SSH'
 sudo ufw allow 25565/tcp comment 'Minecraft Java'
-sudo ufw allow 19132/tcp comment 'Geyser Bedrock TCP'
-sudo ufw allow 19132/udp comment 'Geyser Bedrock UDP'
+sudo ufw allow 25565/udp comment 'Minecraft Java UDP'
 sudo ufw --force enable
 info "Firewall configured."
+warn "If you install Geyser later, also open: sudo ufw allow 19132/tcp && sudo ufw allow 19132/udp"
 
 # =============================================================
 #  SYSTEMD SERVICE
@@ -312,8 +340,11 @@ After=network.target
 [Service]
 User=minecraft
 WorkingDirectory=/opt/minecraft/server
+ExecStartPre=/usr/bin/test -f /opt/minecraft/server/server.jar
 ExecStart=/opt/minecraft/server/start.sh
 ExecStop=/bin/kill -s SIGINT \$MAINPID
+TimeoutStopSec=120
+SuccessExitStatus=143
 Restart=on-failure
 RestartSec=10
 StandardInput=null
@@ -330,13 +361,15 @@ info "Systemd service created and enabled."
 #  FIRST RUN (generates world + config files)
 # =============================================================
 
-info "Running server once to generate configs (30 seconds)..."
-sudo -u minecraft timeout 30 bash /opt/minecraft/server/start.sh || true
+info "Running server for 120 seconds to generate configs..."
+sudo -u minecraft timeout 120 bash /opt/minecraft/server/start.sh || true
 info "First run complete."
 
 # =============================================================
 #  DONE
 # =============================================================
+
+PUBLIC_IP=$(curl -fsSL https://api.ipify.org 2>/dev/null || echo "unknown")
 
 echo ""
 echo -e "${GREEN}=========================================${NC}"
@@ -346,24 +379,28 @@ echo ""
 echo "  Software:  $SOFTWARE"
 echo "  Version:   $MC_VERSION"
 echo "  RAM:       $RAM"
+echo "  Public IP: $PUBLIC_IP"
 if [ -n "$WORLD_SEED" ]; then
   echo "  Seed:      $WORLD_SEED"
 else
   echo "  Seed:      Random (check server.properties after first run)"
 fi
 echo ""
+echo -e "${YELLOW}  OCI Security List — open these ports:${NC}"
+echo "    TCP 25565  (Minecraft Java)"
+echo "    TCP+UDP 19132  (if using Geyser/Bedrock)"
+echo ""
 echo "  Server dir:  /opt/minecraft/server"
 echo "  Start:       sudo systemctl start minecraft"
 echo "  Stop:        sudo systemctl stop minecraft"
 echo "  Logs:        sudo journalctl -u minecraft -f"
-echo "  Console:     sudo -u minecraft screen -r (if using screen)"
 echo ""
 if [[ "$INSTALL_PTERO" =~ ^[Yy]$ ]]; then
   echo -e "${YELLOW}  Pterodactyl: Run the pterodactyl-setup.sh script next.${NC}"
   echo ""
 fi
 echo "  Remember to:"
-echo "  1) Open OCI Security List ports: 25565 TCP, 19132 TCP+UDP"
+echo "  1) Open OCI Security List port 25565 TCP"
 echo "  2) Configure DriveBackupV2 with client's cloud storage"
 echo "  3) Add players to whitelist: /whitelist add <player>"
 if [[ "$INSTALL_ESSENTIALS" =~ ^[Yy]$ ]]; then
