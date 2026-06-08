@@ -8,6 +8,8 @@
 
 set -Eeuo pipefail
 
+export DEBIAN_FRONTEND=noninteractive
+
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -26,7 +28,6 @@ RAM="8G"
 PLUGINS_DIR="/opt/minecraft/server/plugins"
 
 # Helper: download a plugin with validation
-# Usage: dl_plugin <url> <output_path> <name>
 dl_plugin() {
   local url="$1"
   local out="$2"
@@ -60,7 +61,9 @@ echo ""
 section "System Update"
 
 sudo apt-get update -y
-sudo apt-get upgrade -y
+sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
+  -o Dpkg::Options::="--force-confdef" \
+  -o Dpkg::Options::="--force-confold"
 sudo apt-get install -y curl wget jq ufw unzip tmux
 info "System updated."
 
@@ -108,15 +111,10 @@ HTTP_CODE=$(sudo -u minecraft curl -fsSL -A "$USER_AGENT" \
   "https://api.purpurmc.org/v2/purpur/${MC_VERSION}/latest/download")
 
 if [ "$HTTP_CODE" != "200" ]; then
-  error "Failed to download Purpur ${MC_VERSION} (HTTP $HTTP_CODE). Check the version is valid."
+  error "Failed to download Purpur ${MC_VERSION} (HTTP $HTTP_CODE)."
 fi
 
-# Verify it's actually a JAR
-if ! file /opt/minecraft/server/server.jar | grep -q "Java archive"; then
-  error "Downloaded file is not a valid JAR. Check Purpur API for version ${MC_VERSION}."
-fi
-
-info "Purpur ${MC_VERSION} downloaded and verified."
+info "Purpur ${MC_VERSION} downloaded."
 
 # =============================================================
 #  EULA
@@ -189,31 +187,29 @@ EOF
 
 sudo chmod +x /opt/minecraft/server/start.sh
 sudo chown minecraft:minecraft /opt/minecraft/server/start.sh
-info "start.sh written with Aikar flags (8G heap tuned)."
+info "start.sh written with Aikar flags."
 
 # =============================================================
 #  PLUGINS
 # =============================================================
 section "Downloading Plugins"
 
-# --- Geyser (Bedrock support) ---
+# --- Geyser ---
 dl_plugin \
   "https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest/downloads/spigot" \
-  "$PLUGINS_DIR/Geyser-Spigot.jar" \
-  "Geyser"
+  "$PLUGINS_DIR/Geyser-Spigot.jar" "Geyser"
 
-# --- Floodgate (Bedrock auth) ---
+# --- Floodgate ---
 dl_plugin \
   "https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest/downloads/spigot" \
-  "$PLUGINS_DIR/floodgate-spigot.jar" \
-  "Floodgate"
+  "$PLUGINS_DIR/floodgate-spigot.jar" "Floodgate"
 
-# --- BedrockConnect (console DNS bypass) ---
+# --- BedrockConnect ---
 BC_URL=$(curl -fsSL -A "$USER_AGENT" "https://api.github.com/repos/Pugmatt/BedrockConnect/releases/latest" \
   | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' | head -1 || echo "")
 dl_plugin "$BC_URL" "$PLUGINS_DIR/BedrockConnect.jar" "BedrockConnect"
 
-# --- Grim Anticheat (via Modrinth) ---
+# --- Grim Anticheat ---
 GRIM_URL=$(curl -fsSL -A "$USER_AGENT" \
   "https://api.modrinth.com/v2/project/grimac/version?loaders=[%22paper%22]&game_versions=[%221.21.11%22]" \
   | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
@@ -235,29 +231,28 @@ LP_URL=$(curl -fsSL -A "$USER_AGENT" "https://api.github.com/repos/LuckPerms/Luc
   | head -1 || echo "")
 dl_plugin "$LP_URL" "$PLUGINS_DIR/LuckPerms.jar" "LuckPerms"
 
-# --- CoreProtect (via Modrinth) ---
+# --- CoreProtect ---
 CP_URL=$(curl -fsSL -A "$USER_AGENT" \
   "https://api.modrinth.com/v2/project/coreprotect/version?loaders=[%22paper%22]" \
   | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
 dl_plugin "$CP_URL" "$PLUGINS_DIR/CoreProtect.jar" "CoreProtect"
 
-# --- Graves (via Modrinth) ---
+# --- Graves ---
 GRAVES_URL=$(curl -fsSL -A "$USER_AGENT" \
   "https://api.modrinth.com/v2/project/graves/version?loaders=[%22paper%22]" \
   | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
 dl_plugin "$GRAVES_URL" "$PLUGINS_DIR/Graves.jar" "Graves"
 
-# --- Chunky (world pre-gen) ---
+# --- Chunky ---
 CHUNKY_URL=$(curl -fsSL -A "$USER_AGENT" \
   "https://api.modrinth.com/v2/project/chunky/version?loaders=[%22bukkit%22]" \
   | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
 dl_plugin "$CHUNKY_URL" "$PLUGINS_DIR/Chunky.jar" "Chunky"
 
-# --- Spark (performance profiler) ---
+# --- Spark ---
 dl_plugin \
   "https://ci.lucko.me/job/spark/lastSuccessfulBuild/artifact/spark-bukkit/build/libs/spark-bukkit.jar" \
-  "$PLUGINS_DIR/spark.jar" \
-  "Spark"
+  "$PLUGINS_DIR/spark.jar" "Spark"
 
 # --- DriveBackupV2 ---
 DRIVE_URL=$(curl -fsSL -A "$USER_AGENT" \
@@ -266,7 +261,7 @@ DRIVE_URL=$(curl -fsSL -A "$USER_AGENT" \
   | head -1 || echo "")
 dl_plugin "$DRIVE_URL" "$PLUGINS_DIR/DriveBackupV2.jar" "DriveBackupV2"
 
-# --- TAB (player list) ---
+# --- TAB ---
 TAB_URL=$(curl -fsSL -A "$USER_AGENT" "https://api.github.com/repos/NEZNAMY/TAB/releases/latest" \
   | jq -r '.assets[] | select(.name | endswith(".jar") and (contains("TAB") or contains("tab"))) | .browser_download_url' \
   | head -1 || echo "")
@@ -298,8 +293,6 @@ sudo ufw allow 19132/tcp comment 'Geyser Bedrock TCP'
 sudo ufw allow 19132/udp comment 'Geyser Bedrock UDP'
 sudo ufw --force enable
 info "Firewall configured."
-warn "Remember to also open these ports in your OCI Security List."
-warn "Netdata (port 19999) is intentionally NOT opened — add your IP manually in OCI if needed."
 
 # =============================================================
 #  FAIL2BAN
@@ -311,15 +304,15 @@ sudo systemctl start fail2ban
 info "Fail2Ban installed and running."
 
 # =============================================================
-#  NETDATA (server monitoring)
+#  NETDATA
 # =============================================================
 section "Netdata"
 curl -fsSL https://get.netdata.cloud/kickstart.sh > /tmp/netdata-kickstart.sh
 sudo sh /tmp/netdata-kickstart.sh --non-interactive --dont-start-it 2>/dev/null || \
-  warn "Netdata install failed — skip or install manually."
+  warn "Netdata install failed — install manually."
 sudo systemctl enable netdata 2>/dev/null || true
 sudo systemctl start netdata 2>/dev/null || true
-info "Netdata installed (port 19999 — restrict to your IP in OCI Security List before opening)."
+info "Netdata installed (port 19999 — restrict to your IP in OCI Security List)."
 
 # =============================================================
 #  SYSTEMD SERVICE
@@ -352,12 +345,12 @@ sudo systemctl enable minecraft
 info "Systemd service created and enabled."
 
 # =============================================================
-#  FIRST RUN (generates world + config files)
+#  FIRST RUN
 # =============================================================
 section "First Run"
-info "Running server for 120 seconds to generate configs (including Geyser)..."
+info "Running server for 120 seconds to generate configs..."
 sudo -u minecraft timeout 120 bash /opt/minecraft/server/start.sh || true
-info "First run complete. World and config files generated."
+info "First run complete."
 
 # =============================================================
 #  CONFIGURE GEYSER
@@ -370,9 +363,7 @@ if [ -f "$GEYSER_CONFIG" ]; then
   sudo sed -i 's/auth-type: online/auth-type: floodgate/' "$GEYSER_CONFIG"
   info "Geyser auth-type set to floodgate."
 else
-  warn "Geyser config not found — server may need more time to initialise."
-  warn "Once server is running, set auth-type: floodgate manually in:"
-  warn "  $GEYSER_CONFIG"
+  warn "Geyser config not found — set auth-type: floodgate manually once server starts."
 fi
 
 # =============================================================
@@ -401,7 +392,7 @@ echo "    TCP+UDP 19132  (Geyser Bedrock)"
 echo "    TCP 19999  (Netdata — restrict to your IP only)"
 echo ""
 echo -e "${YELLOW}  Manual steps still needed:${NC}"
-echo "  1) Open ports above in OCI Console Security List"
+echo "  1) Open ports in OCI Console Security List"
 echo "  2) Configure DriveBackupV2 with Google/OneDrive credentials"
 echo "  3) Run Chunky pre-gen once server is running:"
 echo "       /chunky world world"
