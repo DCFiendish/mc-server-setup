@@ -193,7 +193,6 @@ info "  BedrockConnect downloaded."
 GRIM_URL=$(curl -s "https://api.modrinth.com/v2/project/grimac/version?loaders=[%22paper%22]&game_versions=[%221.21.11%22]" \
   | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
 if [ -z "$GRIM_URL" ]; then
-  # Fallback: latest release from Modrinth regardless of version filter
   GRIM_URL=$(curl -s "https://api.modrinth.com/v2/project/grimac/version" \
     | jq -r '.[0].files[] | select(.primary==true) | .url')
 fi
@@ -354,9 +353,25 @@ info "Systemd service created and enabled (auto-restart on crash)."
 #  FIRST RUN (generates world + config files)
 # =============================================================
 section "First Run"
-info "Running server for 30 seconds to generate configs..."
-sudo -u minecraft timeout 30 bash /opt/minecraft/server/start.sh || true
+info "Running server for 45 seconds to generate configs (including Geyser)..."
+sudo -u minecraft timeout 45 bash /opt/minecraft/server/start.sh || true
 info "First run complete. World and config files generated."
+
+# =============================================================
+#  CONFIGURE GEYSER
+# =============================================================
+section "Configuring Geyser"
+
+GEYSER_CONFIG="$PLUGINS_DIR/Geyser-Spigot/config.yml"
+
+if [ -f "$GEYSER_CONFIG" ]; then
+  sudo sed -i 's/auth-type: online/auth-type: floodgate/' "$GEYSER_CONFIG"
+  info "Geyser auth-type set to floodgate."
+else
+  warn "Geyser config not found — server may need more time to initialise."
+  warn "Once server is running, set auth-type: floodgate manually in:"
+  warn "  $GEYSER_CONFIG"
+fi
 
 # =============================================================
 #  DONE
@@ -377,19 +392,17 @@ fi
 echo ""
 echo -e "${YELLOW}  Manual steps still needed:${NC}"
 echo "  1) OCI Console → Security List → open ports 25565, 19132, 19999"
-echo "  2) Configure Geyser: plugins/Geyser-Spigot/config.yml"
-echo "       Set auth-type: floodgate"
-echo "  3) Configure DriveBackupV2 with your Google/OneDrive"
-echo "  4) Run Chunky pre-gen once server is running:"
+echo "  2) Configure DriveBackupV2 with your Google/OneDrive credentials"
+echo "  3) Run Chunky pre-gen once server is running:"
 echo "       /chunky world world"
 echo "       /chunky radius 2000"
 echo "       /chunky start"
-echo "  5) Lock Nether/End via Multiverse:"
+echo "  4) Lock Nether/End via Multiverse:"
 echo "       /mv create world_nether NETHER"
 echo "       /mv modify set allowentry false world_nether"
-echo "  6) Add players: /whitelist add <playername>"
-echo "  7) Run Pterodactyl setup: bash pterodactyl-setup.sh"
-echo "  8) Restrict Netdata port 19999 to your IP in OCI Security List"
+echo "  5) Add players: /whitelist add <playername>"
+echo "  6) Run Pterodactyl setup: bash pterodactyl-setup.sh"
+echo "  7) Restrict Netdata port 19999 to your IP in OCI Security List"
 echo ""
 echo -e "${GREEN}  Start:  sudo systemctl start minecraft${NC}"
 echo -e "${GREEN}  Logs:   sudo journalctl -u minecraft -f${NC}"
