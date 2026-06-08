@@ -6,7 +6,7 @@
 #  GitHub: DCFiendish
 # =============================================================
 
-set -e
+set -Eeuo pipefail
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -24,6 +24,21 @@ MC_VERSION="1.21.11"
 SOFTWARE="purpur"
 RAM="8G"
 PLUGINS_DIR="/opt/minecraft/server/plugins"
+
+# Helper: download a plugin with validation
+# Usage: dl_plugin <url> <output_path> <name>
+dl_plugin() {
+  local url="$1"
+  local out="$2"
+  local name="$3"
+  if [ -z "$url" ]; then
+    warn "  $name: download URL not found — install manually."
+    return
+  fi
+  sudo -u minecraft curl -fsSL -A "$USER_AGENT" "$url" -o "$out" \
+    || warn "  $name: download failed — install manually."
+  info "  $name downloaded."
+}
 
 echo ""
 echo "========================================="
@@ -46,7 +61,7 @@ section "System Update"
 
 sudo apt-get update -y
 sudo apt-get upgrade -y
-sudo apt-get install -y curl wget jq ufw unzip screen
+sudo apt-get install -y curl wget jq ufw unzip tmux
 info "System updated."
 
 # =============================================================
@@ -76,7 +91,7 @@ info "Java 21 Temurin installed."
 section "Minecraft User & Directories"
 
 if ! id "minecraft" &>/dev/null; then
-  sudo useradd -r -m -d /opt/minecraft -s /bin/bash minecraft
+  sudo useradd -r -m -U -d /opt/minecraft -s /usr/sbin/nologin minecraft
 fi
 sudo mkdir -p /opt/minecraft/server/plugins
 sudo chown -R minecraft:minecraft /opt/minecraft
@@ -87,10 +102,21 @@ info "minecraft user and directories ready."
 # =============================================================
 section "Downloading Purpur ${MC_VERSION}"
 
-sudo -u minecraft curl -s \
+HTTP_CODE=$(sudo -u minecraft curl -fsSL -A "$USER_AGENT" \
+  -w "%{http_code}" \
   -o /opt/minecraft/server/server.jar \
-  "https://api.purpurmc.org/v2/purpur/${MC_VERSION}/latest/download"
-info "Purpur ${MC_VERSION} downloaded."
+  "https://api.purpurmc.org/v2/purpur/${MC_VERSION}/latest/download")
+
+if [ "$HTTP_CODE" != "200" ]; then
+  error "Failed to download Purpur ${MC_VERSION} (HTTP $HTTP_CODE). Check the version is valid."
+fi
+
+# Verify it's actually a JAR
+if ! file /opt/minecraft/server/server.jar | grep -q "Java archive"; then
+  error "Downloaded file is not a valid JAR. Check Purpur API for version ${MC_VERSION}."
+fi
+
+info "Purpur ${MC_VERSION} downloaded and verified."
 
 # =============================================================
 #  EULA
@@ -131,7 +157,7 @@ sudo chown minecraft:minecraft /opt/minecraft/server/server.properties
 info "server.properties written."
 
 # =============================================================
-#  START SCRIPT (Aikar flags, >12GB variant)
+#  START SCRIPT (Aikar flags, 8G heap)
 # =============================================================
 section "Start Script"
 
@@ -144,10 +170,9 @@ java -Xms8G -Xmx8G \
   -XX:MaxGCPauseMillis=200 \
   -XX:+UnlockExperimentalVMOptions \
   -XX:+DisableExplicitGC \
-  -XX:+AlwaysPreTouch \
-  -XX:G1NewSizePercent=40 \
-  -XX:G1MaxNewSizePercent=50 \
-  -XX:G1HeapRegionSize=16M \
+  -XX:G1NewSizePercent=30 \
+  -XX:G1MaxNewSizePercent=40 \
+  -XX:G1HeapRegionSize=8M \
   -XX:G1ReservePercent=15 \
   -XX:G1HeapWastePercent=5 \
   -XX:G1MixedGCCountTarget=4 \
@@ -164,7 +189,7 @@ EOF
 
 sudo chmod +x /opt/minecraft/server/start.sh
 sudo chown minecraft:minecraft /opt/minecraft/server/start.sh
-info "start.sh written with Aikar flags."
+info "start.sh written with Aikar flags (8G heap tuned)."
 
 # =============================================================
 #  PLUGINS
@@ -172,120 +197,93 @@ info "start.sh written with Aikar flags."
 section "Downloading Plugins"
 
 # --- Geyser (Bedrock support) ---
-sudo -u minecraft curl -s -L \
+dl_plugin \
   "https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest/downloads/spigot" \
-  -o "$PLUGINS_DIR/Geyser-Spigot.jar"
-info "  Geyser downloaded."
+  "$PLUGINS_DIR/Geyser-Spigot.jar" \
+  "Geyser"
 
 # --- Floodgate (Bedrock auth) ---
-sudo -u minecraft curl -s -L \
+dl_plugin \
   "https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest/downloads/spigot" \
-  -o "$PLUGINS_DIR/floodgate-spigot.jar"
-info "  Floodgate downloaded."
+  "$PLUGINS_DIR/floodgate-spigot.jar" \
+  "Floodgate"
 
 # --- BedrockConnect (console DNS bypass) ---
-BC_URL=$(curl -s "https://api.github.com/repos/Pugmatt/BedrockConnect/releases/latest" \
-  | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' | head -1)
-sudo -u minecraft curl -s -L "$BC_URL" -o "$PLUGINS_DIR/BedrockConnect.jar"
-info "  BedrockConnect downloaded."
+BC_URL=$(curl -fsSL -A "$USER_AGENT" "https://api.github.com/repos/Pugmatt/BedrockConnect/releases/latest" \
+  | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' | head -1 || echo "")
+dl_plugin "$BC_URL" "$PLUGINS_DIR/BedrockConnect.jar" "BedrockConnect"
 
 # --- Grim Anticheat (via Modrinth) ---
-GRIM_URL=$(curl -s "https://api.modrinth.com/v2/project/grimac/version?loaders=[%22paper%22]&game_versions=[%221.21.11%22]" \
+GRIM_URL=$(curl -fsSL -A "$USER_AGENT" \
+  "https://api.modrinth.com/v2/project/grimac/version?loaders=[%22paper%22]&game_versions=[%221.21.11%22]" \
   | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
 if [ -z "$GRIM_URL" ]; then
-  GRIM_URL=$(curl -s "https://api.modrinth.com/v2/project/grimac/version" \
-    | jq -r '.[0].files[] | select(.primary==true) | .url')
+  GRIM_URL=$(curl -fsSL -A "$USER_AGENT" "https://api.modrinth.com/v2/project/grimac/version" \
+    | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
 fi
-sudo -u minecraft curl -s -L "$GRIM_URL" -o "$PLUGINS_DIR/GrimAC.jar"
-info "  Grim Anticheat downloaded."
+dl_plugin "$GRIM_URL" "$PLUGINS_DIR/GrimAC.jar" "Grim Anticheat"
 
 # --- EssentialsX ---
-ESS_URL=$(curl -s "https://api.github.com/repos/EssentialsX/Essentials/releases/latest" \
-  | jq -r '.assets[] | select(.name | startswith("EssentialsX-") and endswith(".jar")) | .browser_download_url' | head -1)
-sudo -u minecraft curl -s -L "$ESS_URL" -o "$PLUGINS_DIR/EssentialsX.jar"
-info "  EssentialsX downloaded."
+ESS_URL=$(curl -fsSL -A "$USER_AGENT" "https://api.github.com/repos/EssentialsX/Essentials/releases/latest" \
+  | jq -r '.assets[] | select(.name | startswith("EssentialsX-") and endswith(".jar")) | .browser_download_url' \
+  | head -1 || echo "")
+dl_plugin "$ESS_URL" "$PLUGINS_DIR/EssentialsX.jar" "EssentialsX"
 
 # --- LuckPerms ---
-LP_URL=$(curl -s "https://api.github.com/repos/LuckPerms/LuckPerms/releases/latest" \
-  | jq -r '.assets[] | select(.name | startswith("LuckPerms-Bukkit")) | .browser_download_url' | head -1)
-sudo -u minecraft curl -s -L "$LP_URL" -o "$PLUGINS_DIR/LuckPerms.jar"
-info "  LuckPerms downloaded."
+LP_URL=$(curl -fsSL -A "$USER_AGENT" "https://api.github.com/repos/LuckPerms/LuckPerms/releases/latest" \
+  | jq -r '.assets[] | select(.name | startswith("LuckPerms-Bukkit")) | .browser_download_url' \
+  | head -1 || echo "")
+dl_plugin "$LP_URL" "$PLUGINS_DIR/LuckPerms.jar" "LuckPerms"
 
 # --- CoreProtect (via Modrinth) ---
-CP_URL=$(curl -s "https://api.modrinth.com/v2/project/coreprotect/version?loaders=[%22paper%22]" \
-  | jq -r '.[0].files[] | select(.primary==true) | .url')
-sudo -u minecraft curl -s -L "$CP_URL" -o "$PLUGINS_DIR/CoreProtect.jar"
-info "  CoreProtect downloaded."
+CP_URL=$(curl -fsSL -A "$USER_AGENT" \
+  "https://api.modrinth.com/v2/project/coreprotect/version?loaders=[%22paper%22]" \
+  | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
+dl_plugin "$CP_URL" "$PLUGINS_DIR/CoreProtect.jar" "CoreProtect"
 
 # --- Graves (via Modrinth) ---
-GRAVES_URL=$(curl -s "https://api.modrinth.com/v2/project/graves/version?loaders=[%22paper%22]" \
+GRAVES_URL=$(curl -fsSL -A "$USER_AGENT" \
+  "https://api.modrinth.com/v2/project/graves/version?loaders=[%22paper%22]" \
   | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
-if [ -n "$GRAVES_URL" ]; then
-  sudo -u minecraft curl -s -L "$GRAVES_URL" -o "$PLUGINS_DIR/Graves.jar"
-  info "  Graves downloaded."
-else
-  warn "  Graves not found on Modrinth — download manually from SpigotMC."
-fi
+dl_plugin "$GRAVES_URL" "$PLUGINS_DIR/Graves.jar" "Graves"
 
 # --- Chunky (world pre-gen) ---
-CHUNKY_URL=$(curl -s "https://api.modrinth.com/v2/project/chunky/version?loaders=[%22bukkit%22]" \
-  | jq -r '.[0].files[] | select(.primary==true) | .url')
-sudo -u minecraft curl -s -L "$CHUNKY_URL" -o "$PLUGINS_DIR/Chunky.jar"
-info "  Chunky downloaded."
+CHUNKY_URL=$(curl -fsSL -A "$USER_AGENT" \
+  "https://api.modrinth.com/v2/project/chunky/version?loaders=[%22bukkit%22]" \
+  | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
+dl_plugin "$CHUNKY_URL" "$PLUGINS_DIR/Chunky.jar" "Chunky"
 
 # --- Spark (performance profiler) ---
-sudo -u minecraft curl -s -L \
+dl_plugin \
   "https://ci.lucko.me/job/spark/lastSuccessfulBuild/artifact/spark-bukkit/build/libs/spark-bukkit.jar" \
-  -o "$PLUGINS_DIR/spark.jar"
-info "  Spark downloaded."
+  "$PLUGINS_DIR/spark.jar" \
+  "Spark"
 
 # --- DriveBackupV2 ---
-DRIVE_URL=$(curl -s "https://api.github.com/repos/MinIO4/DriveBackupV2/releases/latest" \
-  | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' | head -1)
-sudo -u minecraft curl -s -L "$DRIVE_URL" -o "$PLUGINS_DIR/DriveBackupV2.jar"
-info "  DriveBackupV2 downloaded."
+DRIVE_URL=$(curl -fsSL -A "$USER_AGENT" \
+  "https://api.github.com/repos/MinIO4/DriveBackupV2/releases/latest" \
+  | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' \
+  | head -1 || echo "")
+dl_plugin "$DRIVE_URL" "$PLUGINS_DIR/DriveBackupV2.jar" "DriveBackupV2"
 
 # --- TAB (player list) ---
-TAB_URL=$(curl -s "https://api.github.com/repos/NEZNAMY/TAB/releases/latest" \
-  | jq -r '.assets[] | select(.name | endswith(".jar") and (contains("TAB") or contains("tab"))) | .browser_download_url' | head -1)
-sudo -u minecraft curl -s -L "$TAB_URL" -o "$PLUGINS_DIR/TAB.jar"
-info "  TAB downloaded."
+TAB_URL=$(curl -fsSL -A "$USER_AGENT" "https://api.github.com/repos/NEZNAMY/TAB/releases/latest" \
+  | jq -r '.assets[] | select(.name | endswith(".jar") and (contains("TAB") or contains("tab"))) | .browser_download_url' \
+  | head -1 || echo "")
+dl_plugin "$TAB_URL" "$PLUGINS_DIR/TAB.jar" "TAB"
 
 # --- Multiverse-Core ---
-MV_URL=$(curl -s "https://api.github.com/repos/Multiverse/Multiverse-Core/releases/latest" \
-  | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' | head -1)
-sudo -u minecraft curl -s -L "$MV_URL" -o "$PLUGINS_DIR/Multiverse-Core.jar"
-info "  Multiverse-Core downloaded."
-
-# --- Pufferfish (free, performance) ---
-PUFFER_URL=$(curl -s "https://api.modrinth.com/v2/project/pufferfish/version?loaders=[%22paper%22]" \
-  | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
-if [ -n "$PUFFER_URL" ]; then
-  sudo -u minecraft curl -s -L "$PUFFER_URL" -o "$PLUGINS_DIR/Pufferfish.jar"
-  info "  Pufferfish downloaded."
-else
-  warn "  Pufferfish not found via Modrinth API — download manually from pufferfish.host."
-fi
+MV_URL=$(curl -fsSL -A "$USER_AGENT" \
+  "https://api.github.com/repos/Multiverse/Multiverse-Core/releases/latest" \
+  | jq -r '.assets[] | select(.name | endswith(".jar")) | .browser_download_url' \
+  | head -1 || echo "")
+dl_plugin "$MV_URL" "$PLUGINS_DIR/Multiverse-Core.jar" "Multiverse-Core"
 
 # --- FarmLimiter ---
-FL_URL=$(curl -s "https://api.modrinth.com/v2/project/farmlimiter/version?loaders=[%22paper%22]" \
+FL_URL=$(curl -fsSL -A "$USER_AGENT" \
+  "https://api.modrinth.com/v2/project/farmlimiter/version?loaders=[%22paper%22]" \
   | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
-if [ -n "$FL_URL" ]; then
-  sudo -u minecraft curl -s -L "$FL_URL" -o "$PLUGINS_DIR/FarmLimiter.jar"
-  info "  FarmLimiter downloaded."
-else
-  warn "  FarmLimiter not found — download manually from Modrinth/SpigotMC."
-fi
-
-# --- ClearLag ---
-CL_URL=$(curl -s "https://api.modrinth.com/v2/project/clearlagg/version?loaders=[%22paper%22]" \
-  | jq -r '.[0].files[] | select(.primary==true) | .url' 2>/dev/null || echo "")
-if [ -n "$CL_URL" ]; then
-  sudo -u minecraft curl -s -L "$CL_URL" -o "$PLUGINS_DIR/ClearLag.jar"
-  info "  ClearLag downloaded."
-else
-  warn "  ClearLag not found — download manually from Modrinth/SpigotMC."
-fi
+dl_plugin "$FL_URL" "$PLUGINS_DIR/FarmLimiter.jar" "FarmLimiter"
 
 info "All plugins downloaded."
 
@@ -298,9 +296,10 @@ sudo ufw allow 22/tcp    comment 'SSH'
 sudo ufw allow 25565/tcp comment 'Minecraft Java'
 sudo ufw allow 19132/tcp comment 'Geyser Bedrock TCP'
 sudo ufw allow 19132/udp comment 'Geyser Bedrock UDP'
-sudo ufw allow 19999/tcp comment 'Netdata monitoring'
 sudo ufw --force enable
 info "Firewall configured."
+warn "Remember to also open these ports in your OCI Security List."
+warn "Netdata (port 19999) is intentionally NOT opened — add your IP manually in OCI if needed."
 
 # =============================================================
 #  FAIL2BAN
@@ -315,12 +314,12 @@ info "Fail2Ban installed and running."
 #  NETDATA (server monitoring)
 # =============================================================
 section "Netdata"
-curl -s https://get.netdata.cloud/kickstart.sh > /tmp/netdata-kickstart.sh
+curl -fsSL https://get.netdata.cloud/kickstart.sh > /tmp/netdata-kickstart.sh
 sudo sh /tmp/netdata-kickstart.sh --non-interactive --dont-start-it 2>/dev/null || \
   warn "Netdata install failed — skip or install manually."
 sudo systemctl enable netdata 2>/dev/null || true
 sudo systemctl start netdata 2>/dev/null || true
-info "Netdata installed. Access at http://PUBLIC_IP:19999 (restrict to your IP in OCI)"
+info "Netdata installed (port 19999 — restrict to your IP in OCI Security List before opening)."
 
 # =============================================================
 #  SYSTEMD SERVICE
@@ -335,8 +334,11 @@ After=network.target
 [Service]
 User=minecraft
 WorkingDirectory=/opt/minecraft/server
+ExecStartPre=/usr/bin/test -f /opt/minecraft/server/server.jar
 ExecStart=/opt/minecraft/server/start.sh
 ExecStop=/bin/kill -s SIGINT \$MAINPID
+TimeoutStopSec=120
+SuccessExitStatus=143
 Restart=on-failure
 RestartSec=10
 StandardInput=null
@@ -347,14 +349,14 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable minecraft
-info "Systemd service created and enabled (auto-restart on crash)."
+info "Systemd service created and enabled."
 
 # =============================================================
 #  FIRST RUN (generates world + config files)
 # =============================================================
 section "First Run"
-info "Running server for 45 seconds to generate configs (including Geyser)..."
-sudo -u minecraft timeout 45 bash /opt/minecraft/server/start.sh || true
+info "Running server for 120 seconds to generate configs (including Geyser)..."
+sudo -u minecraft timeout 120 bash /opt/minecraft/server/start.sh || true
 info "First run complete. World and config files generated."
 
 # =============================================================
@@ -377,6 +379,8 @@ fi
 #  DONE
 # =============================================================
 
+PUBLIC_IP=$(curl -fsSL https://api.ipify.org 2>/dev/null || echo "unknown")
+
 echo ""
 echo -e "${GREEN}=========================================${NC}"
 echo -e "${GREEN}   bmwoo Server Setup Complete!          ${NC}"
@@ -389,10 +393,16 @@ if [ -n "$WORLD_SEED" ]; then
 else
   echo "  Seed:      Random"
 fi
+echo "  Public IP: $PUBLIC_IP"
+echo ""
+echo -e "${YELLOW}  OCI Security List — open these ports:${NC}"
+echo "    TCP 25565  (Minecraft Java)"
+echo "    TCP+UDP 19132  (Geyser Bedrock)"
+echo "    TCP 19999  (Netdata — restrict to your IP only)"
 echo ""
 echo -e "${YELLOW}  Manual steps still needed:${NC}"
-echo "  1) OCI Console → Security List → open ports 25565, 19132, 19999"
-echo "  2) Configure DriveBackupV2 with your Google/OneDrive credentials"
+echo "  1) Open ports above in OCI Console Security List"
+echo "  2) Configure DriveBackupV2 with Google/OneDrive credentials"
 echo "  3) Run Chunky pre-gen once server is running:"
 echo "       /chunky world world"
 echo "       /chunky radius 2000"
@@ -402,7 +412,6 @@ echo "       /mv create world_nether NETHER"
 echo "       /mv modify set allowentry false world_nether"
 echo "  5) Add players: /whitelist add <playername>"
 echo "  6) Run Pterodactyl setup: bash pterodactyl-setup.sh"
-echo "  7) Restrict Netdata port 19999 to your IP in OCI Security List"
 echo ""
 echo -e "${GREEN}  Start:  sudo systemctl start minecraft${NC}"
 echo -e "${GREEN}  Logs:   sudo journalctl -u minecraft -f${NC}"
