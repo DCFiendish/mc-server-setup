@@ -1,13 +1,12 @@
 #!/bin/bash
 
 # =============================================================
-#  Pterodactyl Panel + Wings Setup
-#  For Oracle A1 (Ubuntu 22.04 ARM64)
-#  GitHub: DCFiendish
-#  Run AFTER setup.sh or bmwoo-setup.sh
+#  Pterodactyl Panel + Wings — Fully Automated Setup
+#  FiendishHosting | Oracle A1 (Ubuntu 22.04 ARM64)
+#  Run AFTER needrestart fix and iptables fix
 # =============================================================
 
-set -e
+set -Eeuo pipefail
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -20,158 +19,315 @@ warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 section() { echo -e "\n${CYAN}===== $1 =====${NC}"; }
 
+# =============================================================
+#  COLLECT INFO UPFRONT (the only interactive part)
+# =============================================================
+
 echo ""
 echo "========================================="
-echo "   Pterodactyl Panel + Wings Setup       "
-echo "   FiendishHosting | Oracle A1           "
+echo "   Pterodactyl Setup — FiendishHosting   "
 echo "========================================="
 echo ""
 
-# =============================================================
-#  COLLECT INFO UPFRONT
-# =============================================================
-
-# Get server public IP automatically
-PUBLIC_IP=$(curl -s https://api.ipify.org || curl -s https://ifconfig.me)
+PUBLIC_IP=$(curl -fsSL https://api.ipify.org 2>/dev/null || curl -fsSL https://ifconfig.me)
 info "Detected public IP: $PUBLIC_IP"
-
-echo ""
-echo "You'll need these details for the installer:"
-echo ""
-read -p "Admin email for Pterodactyl panel: " ADMIN_EMAIL
-read -p "Admin username (e.g. fiendish): " ADMIN_USER
-read -s -p "Admin password: " ADMIN_PASS
-echo ""
-read -p "Admin first name: " ADMIN_FIRST
-read -p "Admin last name: " ADMIN_LAST
 echo ""
 
-warn "No domain available yet — using IP address: $PUBLIC_IP"
-warn "Panel will be accessible at http://$PUBLIC_IP (no SSL for now)"
-warn "You can add a domain + SSL later once you have fiendishhosting.com"
+read -p "Client email (for their Pterodactyl account): " CLIENT_EMAIL
+read -s -p "Client panel password: " CLIENT_PASS
+echo ""
+read -p "Client first name: " CLIENT_FIRST
+read -p "Client last name: " CLIENT_LAST
+echo ""
+info "Operator account will be created as: fiendishhosting@gmail.com / dcfiendish"
+read -s -p "Operator panel password: " OPERATOR_PASS
+echo ""
 echo ""
 
-# =============================================================
-#  OPEN REQUIRED PORTS (UFW)
-# =============================================================
-section "Opening Pterodactyl Ports"
-
-# Panel ports
-sudo ufw allow 80/tcp   comment 'Pterodactyl HTTP'
-sudo ufw allow 443/tcp  comment 'Pterodactyl HTTPS (future)'
-# Wings ports
-sudo ufw allow 2022/tcp comment 'Pterodactyl Wings SFTP'
-sudo ufw allow 8080/tcp comment 'Pterodactyl Wings API'
-sudo ufw reload
-
-info "Ports 80, 443, 2022, 8080 opened."
-echo ""
-echo -e "${YELLOW}IMPORTANT: Also open these in your OCI Security List:${NC}"
-echo "  - TCP 80 (HTTP)"
-echo "  - TCP 443 (HTTPS)"
-echo "  - TCP 2022 (Wings SFTP)"
-echo "  - TCP 8080 (Wings API)"
-echo ""
-read -p "Press Enter once you've opened them in OCI Console, or press Enter to continue anyway..."
+# Validate inputs
+[ -z "$CLIENT_EMAIL" ] && error "Client email is required"
+[ -z "$CLIENT_PASS" ]  && error "Client password is required"
+[ -z "$OPERATOR_PASS" ] && error "Operator password is required"
 
 # =============================================================
-#  INSTALL DEPENDENCIES
+#  INSTALL PTERODACTYL (fully unattended via env vars)
 # =============================================================
-section "Installing Dependencies"
+section "Installing Pterodactyl Panel + Wings"
 
-sudo apt-get update -y
-sudo apt-get install -y curl wget git
+info "Downloading installer..."
+curl -fsSL https://pterodactyl-installer.se -o /tmp/ptero-install.sh
+chmod +x /tmp/ptero-install.sh
+
+info "Running unattended install (this takes 5-10 minutes)..."
+
+# Set all env vars to bypass interactive prompts
+export FQDN="$PUBLIC_IP"
+export timezone="America/New_York"
+export email="fiendishhosting@gmail.com"
+export user_email="fiendishhosting@gmail.com"
+export user_username="dcfiendish"
+export user_firstname="Fiendish"
+export user_lastname="Hosting"
+export user_password="$OPERATOR_PASS"
+export ASSUME_SSL="false"
+export CONFIGURE_LETSENCRYPT="false"
+export CONFIGURE_FIREWALL="false"
+export MYSQL_DB="panel"
+export MYSQL_USER="pterodactyl"
+export MYSQL_PASSWORD="$(openssl rand -hex 24)"
+
+# Run panel + wings installer (option 2) non-interactively
+# The installer reads env vars and skips prompts when they're set
+echo "2" | bash /tmp/ptero-install.sh
+
+info "Pterodactyl installer finished."
 
 # =============================================================
-#  RUN PTERODACTYL COMMUNITY INSTALLER
+#  FIX PERMISSIONS + NGINX (always required after install)
 # =============================================================
-section "Running Pterodactyl Installer"
+section "Fixing Permissions and Nginx Config"
 
-echo ""
-info "Launching the Pterodactyl community installer..."
-echo ""
-echo "When prompted by the installer:"
-echo "  - Select option 0 (Install panel)"  
-echo "  - Database: use defaults (press Enter)"
-echo "  - Use Let's Encrypt SSL: NO (no domain yet)"
-echo "  - Use HTTP: YES"
-echo "  - FQDN/Domain: enter your IP: $PUBLIC_IP"
-echo ""
-echo "After panel installs it will ask about Wings:"
-echo "  - Select YES to install Wings on same machine"
-echo "  - Node FQDN: enter your IP: $PUBLIC_IP"
-echo "  - Use SSL: NO"
-echo ""
-read -p "Press Enter to launch the installer..."
-echo ""
+sudo chown -R www-data:www-data /var/www/pterodactyl
+sudo chmod -R 755 /var/www/pterodactyl/storage
 
-bash <(curl -s https://pterodactyl-installer.se)
+# Write correct nginx config (installer uses wrong PHP version — 8.3 not 8.1)
+sudo tee /etc/nginx/sites-available/default > /dev/null << NGINXEOF
+server {
+    listen 80;
+    server_name $PUBLIC_IP;
+    root /var/www/pterodactyl/public;
+    index index.html index.htm index.php;
+    charset utf-8;
+    location / { try_files \$uri \$uri/ /index.php?\$query_string; }
+    location = /favicon.ico { access_log off; log_not_found off; }
+    location = /robots.txt  { access_log off; log_not_found off; }
+    access_log off;
+    error_log /var/log/nginx/pterodactyl.app-error.log error;
+    client_max_body_size 100m;
+    client_body_timeout 120s;
+    sendfile off;
+    location ~ \.php$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size=100M";
+        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+        fastcgi_param HTTP_PROXY "";
+        fastcgi_intercept_errors off;
+        fastcgi_buffer_size 16k;
+        fastcgi_buffers 4 16k;
+        fastcgi_connect_timeout 300;
+        fastcgi_send_timeout 300;
+        fastcgi_read_timeout 300;
+    }
+    location ~ /\.ht { deny all; }
+}
+NGINXEOF
+
+sudo nginx -t && sudo systemctl reload nginx
+info "Nginx configured with php8.3-fpm."
 
 # =============================================================
-#  CREATE ADMIN USER
+#  CREATE CLIENT ADMIN ACCOUNT
 # =============================================================
-section "Creating Admin User"
+section "Creating Panel Accounts"
 
-info "Creating Pterodactyl admin user..."
+info "Creating client admin account ($CLIENT_EMAIL)..."
 cd /var/www/pterodactyl
-
 sudo php artisan p:user:make \
-  --email="$ADMIN_EMAIL" \
-  --username="$ADMIN_USER" \
-  --name-first="$ADMIN_FIRST" \
-  --name-last="$ADMIN_LAST" \
-  --password="$ADMIN_PASS" \
-  --admin=1 2>/dev/null || \
-warn "User creation via artisan failed — you can create the user manually in the panel at http://$PUBLIC_IP"
+  --email="$CLIENT_EMAIL" \
+  --username="$(echo "$CLIENT_EMAIL" | cut -d@ -f1 | tr '.' '_' | tr -dc '[:alnum:]_')" \
+  --name-first="$CLIENT_FIRST" \
+  --name-last="$CLIENT_LAST" \
+  --password="$CLIENT_PASS" \
+  --admin=1 \
+  --no-interaction \
+  || warn "Client account creation failed — create manually in panel at http://$PUBLIC_IP"
+
+info "Operator account (dcfiendish) was created during install."
 
 # =============================================================
-#  CREATE MINECRAFT NODE & ALLOCATION
+#  WAIT FOR PANEL TO BE READY
 # =============================================================
-section "Notes on Node Setup"
+section "Waiting for Panel"
+
+info "Waiting for panel to be reachable..."
+for i in {1..30}; do
+  if curl -fsSL -o /dev/null "http://$PUBLIC_IP" 2>/dev/null; then
+    info "Panel is up!"
+    break
+  fi
+  sleep 5
+  echo -n "."
+done
+echo ""
+
+# =============================================================
+#  GET API KEY (2 min manual step)
+# =============================================================
+section "API Key Setup"
 
 echo ""
-echo -e "${YELLOW}After this script finishes, you need to do these steps manually in the panel:${NC}"
+echo -e "${YELLOW}=============================================${NC}"
+echo -e "${YELLOW}  MANUAL STEP REQUIRED (~2 minutes)         ${NC}"
+echo -e "${YELLOW}=============================================${NC}"
 echo ""
-echo "1. Go to http://$PUBLIC_IP and log in"
-echo "2. Go to Admin → Nodes → Create New"
-echo "   - Name: Main Node"
-echo "   - FQDN: $PUBLIC_IP"
-echo "   - Port: 8080"  
-echo "   - SSL: OFF"
-echo "   - Memory: 20480 (20GB, leaving 4GB for panel/OS)"
-echo "   - Disk: 150000 (150GB)"
-echo "3. On the Node page → Configuration tab → copy the token"
-echo "4. SSH into the server and run:"
-echo "   sudo nano /etc/pterodactyl/config.yml"
-echo "   Paste the token where it says 'token:'"
-echo "   Save and run: sudo systemctl restart wings"
-echo "5. Back in panel → Node → Allocations tab"
-echo "   - Add allocation: IP = $PUBLIC_IP, Port = 25565"
-echo "   - Add allocation: IP = $PUBLIC_IP, Port = 19132 (for Geyser)"
+echo "  1. Open: http://$PUBLIC_IP"
+echo "  2. Log in as: fiendishhosting@gmail.com"
+echo "  3. Go to: Admin panel (gear icon) → Application API"
+echo "  4. Click: Create New"
+echo "  5. Description: FiendishHosting Setup"
+echo "  6. Set ALL permissions to Read + Write"
+echo "  7. Click: Create"
+echo "  8. Copy the key (starts with ptla_)"
 echo ""
+read -p "Paste API key here: " API_KEY
+[ -z "$API_KEY" ] && error "API key is required"
+
+# Save API key for setup.sh to use
+sudo mkdir -p /etc/fiendishhosting
+echo "$API_KEY" | sudo tee /etc/fiendishhosting/api.key > /dev/null
+sudo chmod 600 /etc/fiendishhosting/api.key
+info "API key saved to /etc/fiendishhosting/api.key"
+
+PANEL_URL="http://$PUBLIC_IP"
+AUTH_HEADER="Authorization: Bearer $API_KEY"
+ACCEPT_HEADER="Accept: application/vnd.pterodactyl.v1+json"
+CONTENT_HEADER="Content-Type: application/json"
+
+# Helper: API call with error checking
+ptero_api() {
+  local method="$1"
+  local endpoint="$2"
+  local data="${3:-}"
+  local response
+  if [ -n "$data" ]; then
+    response=$(curl -fsSL -X "$method" \
+      -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$CONTENT_HEADER" \
+      -d "$data" \
+      "$PANEL_URL/api/application/$endpoint")
+  else
+    response=$(curl -fsSL -X "$method" \
+      -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" \
+      "$PANEL_URL/api/application/$endpoint")
+  fi
+  echo "$response"
+}
+
+# =============================================================
+#  CREATE LOCATION VIA API
+# =============================================================
+section "Creating Location"
+
+info "Creating location us-east..."
+LOCATION_RESPONSE=$(ptero_api POST "locations" \
+  '{"short":"us-east","long":"Oracle US East Ashburn"}')
+
+LOCATION_ID=$(echo "$LOCATION_RESPONSE" | jq -r '.attributes.id // empty')
+[ -z "$LOCATION_ID" ] && error "Failed to create location. Response: $LOCATION_RESPONSE"
+info "Location created with ID: $LOCATION_ID"
+
+# =============================================================
+#  CREATE NODE VIA API
+# =============================================================
+section "Creating Node"
+
+info "Creating Main Node..."
+NODE_RESPONSE=$(ptero_api POST "nodes" \
+  "{
+    \"name\": \"Main Node\",
+    \"location_id\": $LOCATION_ID,
+    \"fqdn\": \"$PUBLIC_IP\",
+    \"scheme\": \"http\",
+    \"memory\": 20480,
+    \"memory_overallocate\": 0,
+    \"disk\": 150000,
+    \"disk_overallocate\": 0,
+    \"upload_size\": 100,
+    \"daemon_listen\": 8080,
+    \"daemon_sftp\": 2022,
+    \"behind_proxy\": false,
+    \"maintenance_mode\": false,
+    \"public\": true
+  }")
+
+NODE_ID=$(echo "$NODE_RESPONSE" | jq -r '.attributes.id // empty')
+[ -z "$NODE_ID" ] && error "Failed to create node. Response: $NODE_RESPONSE"
+info "Node created with ID: $NODE_ID"
+
+# =============================================================
+#  CREATE ALLOCATIONS VIA API
+# =============================================================
+section "Creating Allocations"
+
+info "Adding port allocations (25565, 19132)..."
+ptero_api POST "nodes/$NODE_ID/allocations" \
+  "{\"ip\":\"0.0.0.0\",\"ports\":[\"25565\",\"19132\"]}" > /dev/null
+
+info "Allocations added."
+
+# =============================================================
+#  CONFIGURE WINGS VIA AUTO-DEPLOY TOKEN
+# =============================================================
+section "Configuring Wings"
+
+info "Getting Wings deploy token from panel..."
+DEPLOY_TOKEN_RESPONSE=$(ptero_api POST "nodes/$NODE_ID/configuration" "")
+DEPLOY_TOKEN=$(echo "$DEPLOY_TOKEN_RESPONSE" | jq -r '.token // empty')
+
+if [ -z "$DEPLOY_TOKEN" ]; then
+  # Fallback: use wings configure with manual token approach
+  warn "Could not get auto-deploy token via API — trying wings configure directly..."
+  warn "You may need to manually run the wings configure command from the panel."
+else
+  info "Configuring Wings with token..."
+  sudo wings configure \
+    --panel-url "$PANEL_URL" \
+    --token "$DEPLOY_TOKEN" \
+    --node "$NODE_ID" \
+    || error "Wings configure failed"
+fi
+
+# =============================================================
+#  START WINGS
+# =============================================================
+section "Starting Wings"
+
+sudo systemctl enable wings
+sudo systemctl start wings
+sleep 5
+
+if sudo systemctl is-active --quiet wings; then
+  info "Wings is running."
+else
+  error "Wings failed to start. Check: sudo journalctl -u wings -n 50"
+fi
+
+# Save node ID for setup.sh
+echo "$NODE_ID" | sudo tee /etc/fiendishhosting/node.id > /dev/null
+echo "$PUBLIC_IP" | sudo tee /etc/fiendishhosting/panel.url > /dev/null
 
 # =============================================================
 #  DONE
 # =============================================================
-section "Setup Complete!"
+section "Setup Complete"
 
 echo ""
 echo -e "${GREEN}=========================================${NC}"
-echo -e "${GREEN}   Pterodactyl Setup Done!               ${NC}"
+echo -e "${GREEN}   Pterodactyl Setup Complete!           ${NC}"
 echo -e "${GREEN}=========================================${NC}"
 echo ""
-echo "  Panel URL:     http://$PUBLIC_IP"
-echo "  Admin Email:   $ADMIN_EMAIL"
-echo "  Admin User:    $ADMIN_USER"
+echo "  Panel URL:        http://$PUBLIC_IP"
+echo "  Operator login:   fiendishhosting@gmail.com"
+echo "  Client login:     $CLIENT_EMAIL"
+echo "  Node ID:          $NODE_ID"
+echo "  Wings:            Running"
 echo ""
-echo -e "${YELLOW}  Manual steps remaining:${NC}"
-echo "  1) Open OCI Security List ports: 80, 443, 2022, 8080"
-echo "  2) Create node in panel UI"
-echo "  3) Paste Wings token into /etc/pterodactyl/config.yml"
-echo "  4) Restart Wings: sudo systemctl restart wings"
-echo "  5) Add port allocations (25565, 19132)"
-echo "  6) Create server in panel pointing to Minecraft install"
+echo -e "${YELLOW}  Next step: run setup.sh${NC}"
 echo ""
-echo -e "${CYAN}  When you get fiendishhosting.com, run Certbot to add SSL:${NC}"
-echo "  sudo certbot --nginx -d panel.fiendishhosting.com"
+echo -e "${YELLOW}  REMEMBER at handoff:${NC}"
+echo "  1. Verify client can log in"
+echo "  2. Delete dcfiendish account from panel"
+echo "  3. Verify you can no longer log in"
 echo ""
