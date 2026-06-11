@@ -33,9 +33,7 @@ PUBLIC_IP=$(curl -fsSL https://api.ipify.org 2>/dev/null || curl -fsSL https://i
 info "Detected public IP: $PUBLIC_IP"
 echo ""
 
-read -p "Client email (for their Pterodactyl account): " CLIENT_EMAIL
-read -s -p "Client panel password: " CLIENT_PASS
-echo ""
+read -p "Client email: " CLIENT_EMAIL
 read -p "Client first name: " CLIENT_FIRST
 read -p "Client last name: " CLIENT_LAST
 echo ""
@@ -45,52 +43,87 @@ echo ""
 echo ""
 
 # Validate inputs
-[ -z "$CLIENT_EMAIL" ] && error "Client email is required"
-[ -z "$CLIENT_PASS" ]  && error "Client password is required"
+[ -z "$CLIENT_EMAIL" ]  && error "Client email is required"
+[ -z "$CLIENT_FIRST" ]  && error "Client first name is required"
+[ -z "$CLIENT_LAST" ]   && error "Client last name is required"
 [ -z "$OPERATOR_PASS" ] && error "Operator password is required"
 
-# =============================================================
-#  INSTALL PTERODACTYL (fully unattended via env vars)
-# =============================================================
-section "Installing Pterodactyl Panel + Wings"
+# Generate a random secure client password (never shown to operator until end)
+CLIENT_PASS=$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9!@#$%' | head -c 16)
+CLIENT_USERNAME=$(echo "$CLIENT_EMAIL" | cut -d@ -f1 | tr '.' '_' | tr -dc '[:alnum:]_' | head -c 16)
 
-info "Downloading installer..."
+# =============================================================
+#  INSTALL EXPECT
+# =============================================================
+section "Installing expect"
+apt-get install -y expect > /dev/null 2>&1
+info "expect installed."
+
+# =============================================================
+#  DOWNLOAD PTERODACTYL INSTALLER
+# =============================================================
+section "Downloading Pterodactyl Installer"
+sudo rm -f /tmp/ptero-install.sh /tmp/lib.sh
 curl -fsSL https://pterodactyl-installer.se -o /tmp/ptero-install.sh
 chmod +x /tmp/ptero-install.sh
-
-info "Running unattended install (this takes 5-10 minutes)..."
-
-# Set all env vars to bypass interactive prompts
-export FQDN="$PUBLIC_IP"
-export timezone="America/New_York"
-export email="fiendishhosting@gmail.com"
-export user_email="fiendishhosting@gmail.com"
-export user_username="dcfiendish"
-export user_firstname="Fiendish"
-export user_lastname="Hosting"
-export user_password="$OPERATOR_PASS"
-export ASSUME_SSL="false"
-export CONFIGURE_LETSENCRYPT="false"
-export CONFIGURE_FIREWALL="false"
-export MYSQL_DB="panel"
-export MYSQL_USER="pterodactyl"
-export MYSQL_PASSWORD="$(openssl rand -hex 24)"
-
-# Run panel + wings installer (option 2) non-interactively
-# The installer reads env vars and skips prompts when they're set
-printf "2\ny\ny\ny\n" | bash /tmp/ptero-install.sh
-
-info "Pterodactyl installer finished."
+info "Installer downloaded."
 
 # =============================================================
-#  FIX PERMISSIONS + NGINX (always required after install)
+#  BUILD EXPECT SCRIPT
+# =============================================================
+section "Building expect script"
+
+cat << EXPECTEOF > /tmp/ptero-expect.sh
+#!/usr/bin/expect -f
+set timeout 600
+set operator_pass "$OPERATOR_PASS"
+set public_ip "$PUBLIC_IP"
+
+spawn bash /tmp/ptero-install.sh
+
+expect {
+    "Input 0-6:"                          { send "2\r"; exp_continue }
+    "Are you sure you want to proceed?"   { send "y\r"; exp_continue }
+    "Database name"                       { send "\r"; exp_continue }
+    "Database username"                   { send "\r"; exp_continue }
+    "Password (press enter"               { send "\r"; exp_continue }
+    "Select timezone"                     { send "America/New_York\r"; exp_continue }
+    "Let's Encrypt and Pterodactyl:"      { send "fiendishhosting@gmail.com\r"; exp_continue }
+    "Email address for the initial admin" { send "fiendishhosting@gmail.com\r"; exp_continue }
+    "Username for the initial admin"      { send "dcfiendish\r"; exp_continue }
+    "First name for the initial admin"    { send "Fiendish\r"; exp_continue }
+    "Last name for the initial admin"     { send "Hosting\r"; exp_continue }
+    "Password for the initial admin"      { send "\$operator_pass\r"; exp_continue }
+    "Set the FQDN"                        { send "\$public_ip\r"; exp_continue }
+    "configure UFW"                       { send "n\r"; exp_continue }
+    "anonymous telemetry"                 { send "n\r"; exp_continue }
+    "Continue with installation?"         { send "y\r"; exp_continue }
+    "database hosts?"                     { send "n\r"; exp_continue }
+    "Let's Encrypt?"                      { send "n\r"; exp_continue }
+    "Proceed with installation?"          { send "y\r"; exp_continue }
+    "Still assume SSL?"                   { send "n\r"; exp_continue }
+    eof
+}
+EXPECTEOF
+
+chmod +x /tmp/ptero-expect.sh
+info "Expect script built."
+
+# =============================================================
+#  RUN INSTALLER
+# =============================================================
+section "Running Pterodactyl Installer (5-10 minutes)"
+expect /tmp/ptero-expect.sh
+info "Installer finished."
+
+# =============================================================
+#  FIX PERMISSIONS + NGINX
 # =============================================================
 section "Fixing Permissions and Nginx Config"
 
 sudo chown -R www-data:www-data /var/www/pterodactyl
 sudo chmod -R 755 /var/www/pterodactyl/storage
 
-# Write correct nginx config (installer uses wrong PHP version — 8.3 not 8.1)
 sudo tee /etc/nginx/sites-available/default > /dev/null << NGINXEOF
 server {
     listen 80;
@@ -126,32 +159,12 @@ server {
 NGINXEOF
 
 sudo nginx -t && sudo systemctl reload nginx
-info "Nginx configured with php8.3-fpm."
+info "Nginx configured."
 
 # =============================================================
-#  CREATE CLIENT ADMIN ACCOUNT
-# =============================================================
-section "Creating Panel Accounts"
-
-info "Creating client admin account ($CLIENT_EMAIL)..."
-cd /var/www/pterodactyl
-sudo php artisan p:user:make \
-  --email="$CLIENT_EMAIL" \
-  --username="$(echo "$CLIENT_EMAIL" | cut -d@ -f1 | tr '.' '_' | tr -dc '[:alnum:]_')" \
-  --name-first="$CLIENT_FIRST" \
-  --name-last="$CLIENT_LAST" \
-  --password="$CLIENT_PASS" \
-  --admin=1 \
-  --no-interaction \
-  || warn "Client account creation failed — create manually in panel at http://$PUBLIC_IP"
-
-info "Operator account (dcfiendish) was created during install."
-
-# =============================================================
-#  WAIT FOR PANEL TO BE READY
+#  WAIT FOR PANEL
 # =============================================================
 section "Waiting for Panel"
-
 info "Waiting for panel to be reachable..."
 for i in {1..30}; do
   if curl -fsSL -o /dev/null "http://$PUBLIC_IP" 2>/dev/null; then
@@ -164,7 +177,25 @@ done
 echo ""
 
 # =============================================================
-#  GET API KEY (2 min manual step)
+#  CREATE CLIENT ACCOUNT
+# =============================================================
+section "Creating Client Account"
+
+cd /var/www/pterodactyl
+sudo php artisan p:user:make \
+  --email="$CLIENT_EMAIL" \
+  --username="$CLIENT_USERNAME" \
+  --name-first="$CLIENT_FIRST" \
+  --name-last="$CLIENT_LAST" \
+  --password="$CLIENT_PASS" \
+  --admin=1 \
+  --no-interaction \
+  || warn "Client account creation failed — create manually in panel at http://$PUBLIC_IP"
+
+info "Client account created."
+
+# =============================================================
+#  GET API KEY (manual step)
 # =============================================================
 section "API Key Setup"
 
@@ -185,55 +216,45 @@ echo ""
 read -p "Paste API key here: " API_KEY
 [ -z "$API_KEY" ] && error "API key is required"
 
-# Save API key for setup.sh to use
 sudo mkdir -p /etc/fiendishhosting
 echo "$API_KEY" | sudo tee /etc/fiendishhosting/api.key > /dev/null
 sudo chmod 600 /etc/fiendishhosting/api.key
-info "API key saved to /etc/fiendishhosting/api.key"
+info "API key saved."
 
 PANEL_URL="http://$PUBLIC_IP"
 AUTH_HEADER="Authorization: Bearer $API_KEY"
 ACCEPT_HEADER="Accept: application/vnd.pterodactyl.v1+json"
 CONTENT_HEADER="Content-Type: application/json"
 
-# Helper: API call with error checking
 ptero_api() {
   local method="$1"
   local endpoint="$2"
   local data="${3:-}"
-  local response
   if [ -n "$data" ]; then
-    response=$(curl -fsSL -X "$method" \
+    curl -fsSL -X "$method" \
       -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" -H "$CONTENT_HEADER" \
-      -d "$data" \
-      "$PANEL_URL/api/application/$endpoint")
+      -d "$data" "$PANEL_URL/api/application/$endpoint"
   else
-    response=$(curl -fsSL -X "$method" \
+    curl -fsSL -X "$method" \
       -H "$AUTH_HEADER" -H "$ACCEPT_HEADER" \
-      "$PANEL_URL/api/application/$endpoint")
+      "$PANEL_URL/api/application/$endpoint"
   fi
-  echo "$response"
 }
 
 # =============================================================
-#  CREATE LOCATION VIA API
+#  CREATE LOCATION
 # =============================================================
 section "Creating Location"
-
-info "Creating location us-east..."
 LOCATION_RESPONSE=$(ptero_api POST "locations" \
   '{"short":"us-east","long":"Oracle US East Ashburn"}')
-
 LOCATION_ID=$(echo "$LOCATION_RESPONSE" | jq -r '.attributes.id // empty')
 [ -z "$LOCATION_ID" ] && error "Failed to create location. Response: $LOCATION_RESPONSE"
-info "Location created with ID: $LOCATION_ID"
+info "Location created: $LOCATION_ID"
 
 # =============================================================
-#  CREATE NODE VIA API
+#  CREATE NODE
 # =============================================================
 section "Creating Node"
-
-info "Creating Main Node..."
 NODE_RESPONSE=$(ptero_api POST "nodes" \
   "{
     \"name\": \"Main Node\",
@@ -251,49 +272,37 @@ NODE_RESPONSE=$(ptero_api POST "nodes" \
     \"maintenance_mode\": false,
     \"public\": true
   }")
-
 NODE_ID=$(echo "$NODE_RESPONSE" | jq -r '.attributes.id // empty')
 [ -z "$NODE_ID" ] && error "Failed to create node. Response: $NODE_RESPONSE"
-info "Node created with ID: $NODE_ID"
+info "Node created: $NODE_ID"
 
 # =============================================================
-#  CREATE ALLOCATIONS VIA API
+#  CREATE ALLOCATIONS
 # =============================================================
 section "Creating Allocations"
-
-info "Adding port allocations (25565, 19132)..."
 ptero_api POST "nodes/$NODE_ID/allocations" \
-  "{\"ip\":\"0.0.0.0\",\"ports\":[\"25565\",\"19132\"]}" > /dev/null
-
-info "Allocations added."
+  '{"ip":"0.0.0.0","ports":["25565","19132"]}' > /dev/null
+info "Allocations added (25565, 19132)."
 
 # =============================================================
-#  CONFIGURE WINGS VIA AUTO-DEPLOY TOKEN
+#  CONFIGURE + START WINGS
 # =============================================================
 section "Configuring Wings"
 
-info "Getting Wings deploy token from panel..."
-DEPLOY_TOKEN_RESPONSE=$(ptero_api POST "nodes/$NODE_ID/configuration" "")
-DEPLOY_TOKEN=$(echo "$DEPLOY_TOKEN_RESPONSE" | jq -r '.token // empty')
+DEPLOY_RESPONSE=$(ptero_api POST "nodes/$NODE_ID/configuration" "")
+DEPLOY_TOKEN=$(echo "$DEPLOY_RESPONSE" | jq -r '.token // empty')
 
-if [ -z "$DEPLOY_TOKEN" ]; then
-  # Fallback: use wings configure with manual token approach
-  warn "Could not get auto-deploy token via API — trying wings configure directly..."
-  warn "You may need to manually run the wings configure command from the panel."
-else
-  info "Configuring Wings with token..."
+if [ -n "$DEPLOY_TOKEN" ]; then
   sudo wings configure \
     --panel-url "$PANEL_URL" \
     --token "$DEPLOY_TOKEN" \
     --node "$NODE_ID" \
     || error "Wings configure failed"
+else
+  warn "Could not get auto-deploy token — configure Wings manually from the panel."
 fi
 
-# =============================================================
-#  START WINGS
-# =============================================================
 section "Starting Wings"
-
 sudo systemctl enable wings
 sudo systemctl start wings
 sleep 5
@@ -304,9 +313,11 @@ else
   error "Wings failed to start. Check: sudo journalctl -u wings -n 50"
 fi
 
-# Save node ID for setup.sh
-echo "$NODE_ID" | sudo tee /etc/fiendishhosting/node.id > /dev/null
-echo "$PUBLIC_IP" | sudo tee /etc/fiendishhosting/panel.url > /dev/null
+# Save state for starter.sh
+echo "$NODE_ID"    | sudo tee /etc/fiendishhosting/node.id    > /dev/null
+echo "$PUBLIC_IP"  | sudo tee /etc/fiendishhosting/panel.url  > /dev/null
+echo "$API_KEY"    | sudo tee /etc/fiendishhosting/api.key    > /dev/null
+sudo chmod 600 /etc/fiendishhosting/api.key
 
 # =============================================================
 #  DONE
@@ -321,13 +332,17 @@ echo ""
 echo "  Panel URL:        http://$PUBLIC_IP"
 echo "  Operator login:   fiendishhosting@gmail.com"
 echo "  Client login:     $CLIENT_EMAIL"
-echo "  Node ID:          $NODE_ID"
-echo "  Wings:            Running"
 echo ""
-echo -e "${YELLOW}  Next step: run setup.sh${NC}"
+echo -e "${YELLOW}  *** SEND THIS TO CLIENT VIA DISCORD ***${NC}"
+echo -e "${YELLOW}  Panel URL:  http://$PUBLIC_IP${NC}"
+echo -e "${YELLOW}  Username:   $CLIENT_USERNAME${NC}"
+echo -e "${YELLOW}  Password:   $CLIENT_PASS${NC}"
+echo -e "${YELLOW}  Tell them to change their password on first login.${NC}"
 echo ""
-echo -e "${YELLOW}  REMEMBER at handoff:${NC}"
+echo -e "${YELLOW}  REMEMBER AT HANDOFF:${NC}"
 echo "  1. Verify client can log in"
 echo "  2. Delete dcfiendish account from panel"
 echo "  3. Verify you can no longer log in"
+echo ""
+echo -e "${RED}  Next step: run starter.sh${NC}"
 echo ""
