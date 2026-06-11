@@ -115,7 +115,9 @@ expect "Continue with installation? (y/N):"; sleep 0.3; send "y\r"
 
 # Wings prompts
 expect "proceed to wings installation? (y/N):"; sleep 0.3; send "y\r"
+set timeout 120
 expect "configure UFW (firewall)? (y/N):"; sleep 0.3; send "n\r"
+set timeout 600
 expect "configure a user for database hosts? (y/N):"; sleep 0.3; send "n\r"
 expect "configure HTTPS using Let's Encrypt? (y/N):"; sleep 0.3; send "n\r"
 expect "Proceed with installation? (y/N):"; sleep 0.3; send "y\r"
