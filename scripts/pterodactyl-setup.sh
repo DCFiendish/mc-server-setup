@@ -78,7 +78,7 @@ export MYSQL_PASSWORD="$(openssl rand -hex 24)"
 
 # Run panel + wings installer (option 2) non-interactively
 # The installer reads env vars and skips prompts when they're set
-echo "2" | bash /tmp/ptero-install.sh
+printf "2\ny\ny\ny\n" | bash /tmp/ptero-install.sh
 
 info "Pterodactyl installer finished."
 
