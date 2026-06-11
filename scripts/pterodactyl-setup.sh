@@ -87,26 +87,28 @@ proc answer {val} {
 spawn bash /tmp/ptero-install.sh
 
 expect {
-    "Input 0-6:"                          { answer "2"; exp_continue }
-    "Are you sure you want to proceed?"   { answer "y"; exp_continue }
-    "Database name"                       { answer ""; exp_continue }
-    "Database username"                   { answer ""; exp_continue }
-    "Password (press enter"               { answer ""; exp_continue }
-    "Select timezone"                     { answer "America/New_York"; exp_continue }
-    "Let's Encrypt and Pterodactyl:"      { answer "fiendishhosting@gmail.com"; exp_continue }
-    "Email address for the initial admin" { answer "fiendishhosting@gmail.com"; exp_continue }
-    "Username for the initial admin"      { answer "dcfiendish"; exp_continue }
-    "First name for the initial admin"    { answer "Fiendish"; exp_continue }
-    "Last name for the initial admin"     { answer "Hosting"; exp_continue }
-    "Password for the initial admin"      { answer "\$operator_pass"; exp_continue }
-    "Set the FQDN"                        { answer "\$public_ip"; exp_continue }
-    "configure UFW"                       { answer "n"; exp_continue }
-    "anonymous telemetry"                 { answer "n"; exp_continue }
-    "Continue with installation?"         { answer "y"; exp_continue }
-    "database hosts?"                     { answer "n"; exp_continue }
-    "Let's Encrypt?"                      { answer "n"; exp_continue }
-    "Proceed with installation?"          { answer "y"; exp_continue }
-    "Still assume SSL?"                   { answer "n"; exp_continue }
+    "Input 0-6:"                                    { answer "2"; exp_continue }
+    "Are you sure you want to proceed? (y/N):"      { answer "y"; exp_continue }
+    "Database name"                                 { answer ""; exp_continue }
+    "Database username"                             { answer ""; exp_continue }
+    "Password (press enter"                         { answer ""; exp_continue }
+    "Select timezone"                               { answer "America/New_York"; exp_continue }
+    "Let's Encrypt and Pterodactyl:"                { answer "fiendishhosting@gmail.com"; exp_continue }
+    "Email address for the initial admin account:"  { answer "fiendishhosting@gmail.com"; exp_continue }
+    "Username for the initial admin account:"       { answer "dcfiendish"; exp_continue }
+    "First name for the initial admin account:"     { answer "Fiendish"; exp_continue }
+    "Last name for the initial admin account:"      { answer "Hosting"; exp_continue }
+    "Password for the initial admin account:"       { answer "\$operator_pass"; exp_continue }
+    "Set the FQDN of this panel"                    { answer "\$public_ip"; exp_continue }
+    "configure UFW (firewall)? (y/N):"              { answer "n"; exp_continue }
+    "configure firewall-cmd (firewall)? (y/N):"     { answer "n"; exp_continue }
+    "anonymous telemetry data? (yes/no)"            { answer "n"; exp_continue }
+    "Continue with installation? (y/N):"            { answer "y"; exp_continue }
+    "configure a user for database hosts? (y/N):"   { answer "n"; exp_continue }
+    "configure HTTPS using Let's Encrypt? (y/N):"   { answer "n"; exp_continue }
+    "proceed to wings installation? (y/N):"         { answer "y"; exp_continue }
+    "Proceed with installation? (y/N):"             { answer "y"; exp_continue }
+    "Still assume SSL? (y/N):"                      { answer "n"; exp_continue }
     eof
 }
 EXPECTEOF
