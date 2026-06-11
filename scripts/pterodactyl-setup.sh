@@ -73,7 +73,7 @@ info "Installer downloaded."
 # =============================================================
 section "Building expect script"
 
-cat << EXPECTEOF > /tmp/ptero-expect.sh
+sudo tee /tmp/ptero-expect.sh > /dev/null << EXPECTEOF
 #!/usr/bin/expect -f
 set timeout 600
 set operator_pass "$OPERATOR_PASS"
