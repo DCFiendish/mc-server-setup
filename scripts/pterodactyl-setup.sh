@@ -79,38 +79,48 @@ set timeout 600
 set operator_pass "$OPERATOR_PASS"
 set public_ip "$PUBLIC_IP"
 
-proc answer {val} {
-    sleep 0.5
-    send "\$val\r"
-}
-
 spawn bash /tmp/ptero-install.sh
 
-expect {
-    "Input 0-6:"                                    { answer "2"; exp_continue }
-    "Are you sure you want to proceed? (y/N):"      { answer "y"; exp_continue }
-    "Database name"                                 { answer ""; exp_continue }
-    "Database username"                             { answer ""; exp_continue }
-    "Password (press enter"                         { answer ""; exp_continue }
-    "Select timezone"                               { answer "America/New_York"; exp_continue }
-    "Let's Encrypt and Pterodactyl:"                { answer "fiendishhosting@gmail.com"; exp_continue }
-    "Email address for the initial admin account:"  { answer "fiendishhosting@gmail.com"; exp_continue }
-    "Username for the initial admin account:"       { answer "dcfiendish"; exp_continue }
-    "First name for the initial admin account:"     { answer "Fiendish"; exp_continue }
-    "Last name for the initial admin account:"      { answer "Hosting"; exp_continue }
-    "Password for the initial admin account:"       { answer "\$operator_pass"; exp_continue }
-    "Set the FQDN of this panel"                    { answer "\$public_ip"; exp_continue }
-    "configure UFW (firewall)? (y/N):"              { answer "n"; exp_continue }
-    "configure firewall-cmd (firewall)? (y/N):"     { answer "n"; exp_continue }
-    "anonymous telemetry data? (yes/no)"            { answer "n"; exp_continue }
-    "Continue with installation? (y/N):"            { answer "y"; exp_continue }
-    "configure a user for database hosts? (y/N):"   { answer "n"; exp_continue }
-    "configure HTTPS using Let's Encrypt? (y/N):"   { answer "n"; exp_continue }
-    "proceed to wings installation? (y/N):"         { answer "y"; exp_continue }
-    "Proceed with installation? (y/N):"             { answer "y"; exp_continue }
-    "Still assume SSL? (y/N):"                      { answer "n"; exp_continue }
-    eof
-}
+# Menu
+expect "Input 0-6:"; sleep 0.3; send "2\r"
+
+# ARM warning
+expect "Are you sure you want to proceed? (y/N):"; sleep 0.3; send "y\r"
+
+# Database
+expect "Database name (panel):"; sleep 0.3; send "\r"
+expect "Database username (pterodactyl):"; sleep 0.3; send "\r"
+expect "Password (press enter to use randomly generated password):"; sleep 0.3; send "\r"
+
+# Timezone
+expect "Select timezone \[Europe/Stockholm\]:"; sleep 0.3; send "America/New_York\r"
+
+# Email + account setup
+expect "Let's Encrypt and Pterodactyl:"; sleep 0.3; send "fiendishhosting@gmail.com\r"
+expect "Email address for the initial admin account:"; sleep 0.3; send "fiendishhosting@gmail.com\r"
+expect "Username for the initial admin account:"; sleep 0.3; send "dcfiendish\r"
+expect "First name for the initial admin account:"; sleep 0.3; send "Fiendish\r"
+expect "Last name for the initial admin account:"; sleep 0.3; send "Hosting\r"
+expect "Password for the initial admin account:"; sleep 0.3; send "\$operator_pass\r"
+
+# FQDN
+expect "Set the FQDN of this panel"; sleep 0.3; send "\$public_ip\r"
+
+# Firewall + telemetry
+expect "configure UFW (firewall)? (y/N):"; sleep 0.3; send "n\r"
+expect "anonymous telemetry data? (yes/no) \[yes\]:"; sleep 0.3; send "n\r"
+
+# Panel install confirmation
+expect "Continue with installation? (y/N):"; sleep 0.3; send "y\r"
+
+# Wings prompts
+expect "proceed to wings installation? (y/N):"; sleep 0.3; send "y\r"
+expect "configure UFW (firewall)? (y/N):"; sleep 0.3; send "n\r"
+expect "configure a user for database hosts? (y/N):"; sleep 0.3; send "n\r"
+expect "configure HTTPS using Let's Encrypt? (y/N):"; sleep 0.3; send "n\r"
+expect "Proceed with installation? (y/N):"; sleep 0.3; send "y\r"
+
+expect eof
 EXPECTEOF
 
 sudo chmod +x /tmp/ptero-expect.sh
