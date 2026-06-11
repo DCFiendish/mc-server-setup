@@ -79,34 +79,39 @@ set timeout 600
 set operator_pass "$OPERATOR_PASS"
 set public_ip "$PUBLIC_IP"
 
+proc answer {val} {
+    sleep 0.5
+    send "\$val\r"
+}
+
 spawn bash /tmp/ptero-install.sh
 
 expect {
-    "Input 0-6:"                          { send "2\r"; exp_continue }
-    "Are you sure you want to proceed?"   { send "y\r"; exp_continue }
-    "Database name"                       { send "\r"; exp_continue }
-    "Database username"                   { send "\r"; exp_continue }
-    "Password (press enter"               { send "\r"; exp_continue }
-    "Select timezone"                     { send "America/New_York\r"; exp_continue }
-    "Let's Encrypt and Pterodactyl:"      { send "fiendishhosting@gmail.com\r"; exp_continue }
-    "Email address for the initial admin" { send "fiendishhosting@gmail.com\r"; exp_continue }
-    "Username for the initial admin"      { send "dcfiendish\r"; exp_continue }
-    "First name for the initial admin"    { send "Fiendish\r"; exp_continue }
-    "Last name for the initial admin"     { send "Hosting\r"; exp_continue }
-    "Password for the initial admin"      { send "\$operator_pass\r"; exp_continue }
-    "Set the FQDN"                        { send "\$public_ip\r"; exp_continue }
-    "configure UFW"                       { send "n\r"; exp_continue }
-    "anonymous telemetry"                 { send "n\r"; exp_continue }
-    "Continue with installation?"         { send "y\r"; exp_continue }
-    "database hosts?"                     { send "n\r"; exp_continue }
-    "Let's Encrypt?"                      { send "n\r"; exp_continue }
-    "Proceed with installation?"          { send "y\r"; exp_continue }
-    "Still assume SSL?"                   { send "n\r"; exp_continue }
+    "Input 0-6:"                          { answer "2"; exp_continue }
+    "Are you sure you want to proceed?"   { answer "y"; exp_continue }
+    "Database name"                       { answer ""; exp_continue }
+    "Database username"                   { answer ""; exp_continue }
+    "Password (press enter"               { answer ""; exp_continue }
+    "Select timezone"                     { answer "America/New_York"; exp_continue }
+    "Let's Encrypt and Pterodactyl:"      { answer "fiendishhosting@gmail.com"; exp_continue }
+    "Email address for the initial admin" { answer "fiendishhosting@gmail.com"; exp_continue }
+    "Username for the initial admin"      { answer "dcfiendish"; exp_continue }
+    "First name for the initial admin"    { answer "Fiendish"; exp_continue }
+    "Last name for the initial admin"     { answer "Hosting"; exp_continue }
+    "Password for the initial admin"      { answer "\$operator_pass"; exp_continue }
+    "Set the FQDN"                        { answer "\$public_ip"; exp_continue }
+    "configure UFW"                       { answer "n"; exp_continue }
+    "anonymous telemetry"                 { answer "n"; exp_continue }
+    "Continue with installation?"         { answer "y"; exp_continue }
+    "database hosts?"                     { answer "n"; exp_continue }
+    "Let's Encrypt?"                      { answer "n"; exp_continue }
+    "Proceed with installation?"          { answer "y"; exp_continue }
+    "Still assume SSL?"                   { answer "n"; exp_continue }
     eof
 }
 EXPECTEOF
 
-chmod +x /tmp/ptero-expect.sh
+sudo chmod +x /tmp/ptero-expect.sh
 info "Expect script built."
 
 # =============================================================
